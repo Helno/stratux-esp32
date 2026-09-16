@@ -1,3 +1,5 @@
+#include "sdkconfig.h"
+
 #ifdef CONFIG_BT_BLE_ENABLED
 
 #include "nmea_ble.h"
@@ -35,7 +37,7 @@ static struct {
 static esp_ble_adv_data_t adv_data = {
     .set_scan_rsp = false,
     .include_name = true,
-    .include_txpwr = true,
+    .include_txpower = true,
     .min_interval = 0x0006,  // min conn interval 7.5ms
     .max_interval = 0x0010,  // max conn interval 20ms
     .appearance = 0x00,
@@ -162,7 +164,7 @@ static void gatt_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_i
 // NMEA BLE task: polls traffic and sends NMEA sentences via notifications
 void nmea_ble_task(void *arg) {
     char nmea_buf[256];
-    traffic_info_t traffic_snapshot[TRAFFIC_TABLE_MAX];
+    traffic_info_t vehicles[TRAFFIC_TABLE_MAX];
     
     ESP_LOGI(TAG, "NMEA BLE task started");
     
@@ -175,14 +177,14 @@ void nmea_ble_task(void *arg) {
         }
         
         // Get traffic snapshot
-        size_t count = traffic_snapshot(traffic_snapshot, TRAFFIC_TABLE_MAX);
+        size_t count = traffic_snapshot(vehicles, TRAFFIC_TABLE_MAX);
         
         // Send PFLAU (own-ship status) first
         size_t highest_priority = 0;
         if (count > 0) {
             // Find highest-priority target (for now, just first valid one)
             for (size_t i = 0; i < count; i++) {
-                if (traffic_snapshot[i].position_valid) {
+                if (vehicles[i].position_valid) {
                     highest_priority = i;
                     break;
                 }
@@ -190,7 +192,7 @@ void nmea_ble_task(void *arg) {
         }
         
         size_t pflau_len = nmea_format_pflau(count,
-                                              count > 0 ? &traffic_snapshot[highest_priority] : NULL,
+                                              count > 0 ? &vehicles[highest_priority] : NULL,
                                               false,  // gps_valid (M3+)
                                               nmea_buf, sizeof(nmea_buf));
         
@@ -203,11 +205,11 @@ void nmea_ble_task(void *arg) {
         
         // Send PFLAA for each traffic entry
         for (size_t i = 0; i < count; i++) {
-            if (!traffic_snapshot[i].position_valid) {
+            if (!vehicles[i].position_valid) {
                 continue;
             }
             
-            size_t pflaa_len = nmea_format_pflaa(&traffic_snapshot[i],
+            size_t pflaa_len = nmea_format_pflaa(&vehicles[i],
                                                   0.0, 0.0,  // Placeholder ownship (M3+)
                                                   nmea_buf, sizeof(nmea_buf));
             

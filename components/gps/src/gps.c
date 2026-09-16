@@ -16,9 +16,10 @@
 
 static const char *TAG = "gps";
 
-#define GPS_UART_PORT    UART_NUM_1
-#define GPS_RX_GPIO      GPIO_NUM_34  // input-only
-#define GPS_TX_GPIO      GPIO_NUM_4   // output for config commands
+// GPS_UART_PORT, GPS_RX_GPIO, GPS_TX_GPIO now come from pins.h
+// (pins.h provides chip-specific GPIO mappings for D0WD and S3)
+// Removed hardcoded #defines to support both ESP32 variants.
+
 #define GPS_RX_BUF       (2 * 1024)   // 9600 is slow; 2KB headroom is plenty
 #define GPS_LINE_MAX     128          // NMEA sentences are ~80 bytes max
 #define GPS_INIT_DELAY   100          // ms to wait between config commands

@@ -33,7 +33,8 @@ void app_main(void)
     gdl90_out_init();            // CRC self-test + HDLC/CRC framer
     traffic_init();              // table + mutex
     modes_init();                // Mode-S CRC table + ICAO address filter
-    nmea_ble_init();             // BLE GATT server + NMEA formatter (M6 feature)
+    // nmea_ble_init();             // BLE GATT server + NMEA formatter (M6 feature)
+    // TODO: Fix BLE linking - functions missing from bt component
 
     // Worker tasks (Go goroutine -> FreeRTOS task; see AGENTS.md task map).
     xTaskCreate(pong_rx_task,     "pong_rx",     4096, NULL, 10, NULL);
@@ -46,7 +47,8 @@ void app_main(void)
 
     web_start();                 // esp_http_server + WS (M2)
     console_cmd_start();         // '$' WiFi/dest config channel on UART0
-    nmea_ble_start();            // BLE NMEA task (M6 feature)
+    // nmea_ble_start();            // BLE NMEA task (M6 feature)
+    // TODO: Fix BLE linking - functions missing from bt component
 
     ESP_LOGI(TAG, "stratux-esp32 up");
 }

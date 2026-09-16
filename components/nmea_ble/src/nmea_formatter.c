@@ -1,3 +1,5 @@
+#include "sdkconfig.h"
+
 #ifdef CONFIG_BT_BLE_ENABLED
 
 #include "nmea_formatter.h"
@@ -119,16 +121,16 @@ size_t nmea_format_pflaa(const traffic_info_t *traffic,
         // With callsign: ICAO!callsign_ICAO
         pos = snprintf(buf, len,
                        "$PFLAA,%d,%d,%d,%d,%d,%06X!%s_%06X,%d,,%d,%X,%d,%d,%d",
-                       alarm_level, rel_north, rel_east, rel_vertical,
-                       addr_type, traffic->icao_addr, traffic->tail, traffic->icao_addr,
+                       (int)alarm_level, (int)rel_north, (int)rel_east, (int)rel_vertical,
+                       addr_type, (unsigned int)traffic->icao_addr, traffic->tail, (unsigned int)traffic->icao_addr,
                        traffic->track_deg, traffic->speed_kt, acft_type,
                        0, data_source, rssi);
     } else {
         // Without callsign: just ICAO
         pos = snprintf(buf, len,
                        "$PFLAA,%d,%d,%d,%d,%d,%06X,%d,,%d,%X,%d,%d,%d",
-                       alarm_level, rel_north, rel_east, rel_vertical,
-                       addr_type, traffic->icao_addr,
+                       (int)alarm_level, (int)rel_north, (int)rel_east, (int)rel_vertical,
+                       addr_type, (unsigned int)traffic->icao_addr,
                        traffic->track_deg, traffic->speed_kt, acft_type,
                        0, data_source, rssi);
     }
@@ -187,7 +189,7 @@ size_t nmea_format_pflau(size_t traffic_count, const traffic_info_t *hp_traffic,
         pos = snprintf(buf, len,
                        "$PFLAU,%zu,%d,%d,%d,%d,%s,%d,%d,%u,%06X",
                        traffic_count, tx_status, gps_status, power_status, alarm_level,
-                       rel_bearing_str, alarm_type, hp_alt_diff, hp_distance, hp_addr);
+                       rel_bearing_str, alarm_type, (int)hp_alt_diff, (unsigned int)hp_distance, (unsigned int)hp_addr);
     } else {
         // No traffic
         pos = snprintf(buf, len,
