@@ -1,0 +1,24 @@
+menu "M1421 ADS-B Receiver"
+
+    config M1421_ENABLED
+        bool "Enable M1421 receiver (auto-detect)"
+        default y
+        help
+            Enable M1421 ADS-B receiver auto-detection and support.
+            At boot, the system will probe for both Pong and M1421;
+            whichever responds first will be used.
+
+    config M1421_BAUD_RATES
+        string "M1421 baud rates to probe (comma-separated)"
+        default "9600,19200,38400,57600,115200,230400,460800"
+        help
+            List of baud rates to probe when detecting M1421.
+            Tried in order; first successful connection wins.
+
+    config M1421_DETECTION_TIMEOUT_MS
+        int "M1421 detection timeout (ms)"
+        default 5000
+        help
+            Maximum time to wait for M1421 response during detection.
+
+endmenu

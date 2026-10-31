@@ -15,6 +15,7 @@ typedef struct {
                                // while traffic flows, so every line counts)
     bool     pong_degraded;    // Pong reported ERROR SPI; cleared when frames or
                                // heartbeats prove the radio is alive again
+    bool     m1421_connected;  // M1421 ADS-B receiver active and receiving frames
     uint32_t es_msgs;          // 1090ES frames decoded since boot
     uint32_t es_rejected;      // 1090ES frames rejected (CRC fail / unknown DF) —
                                // distinguishes a degraded RF path from empty air
