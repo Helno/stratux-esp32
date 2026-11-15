@@ -172,24 +172,16 @@ size_t nmea_format_pflaa(const traffic_info_t *traffic,
     // Format sentence: $PFLAA,alarm,relN,relE,relV,addrType,ICAO!callsign,course,speed,climbRate,acftType,noTrack,dataSource,rssi*checksum\r\n
     size_t pos = 0;
     
-    if (traffic->tail_valid && traffic->tail[0]) {
-        // With callsign: ICAO!callsign_ICAO
-        pos = snprintf(buf, len,
-                       "$PFLAA,%d,%d,%d,%d,%d,%06X!%s_%06X,%d,,%d,%X,%d,%d,%d",
-                       (int)alarm_level, (int)rel_north, (int)rel_east, (int)rel_vertical,
-                       addr_type, (unsigned int)traffic->icao_addr, traffic->tail, (unsigned int)traffic->icao_addr,
-                       traffic->track_deg, traffic->speed_kt, acft_type,
-                       0, data_source, rssi);
-    } else {
-        // Without callsign: just ICAO
-        pos = snprintf(buf, len,
-                       "$PFLAA,%d,%d,%d,%d,%d,%06X,%d,,%d,%X,%d,%d,%d",
-                       (int)alarm_level, (int)rel_north, (int)rel_east, (int)rel_vertical,
-                       addr_type, (unsigned int)traffic->icao_addr,
-                       traffic->track_deg, traffic->speed_kt, acft_type,
-                       0, data_source, rssi);
-    }
-    
+    // Standard PFLAA: ...,track,turnRate,groundSpeed(m/s),climbRate(m/s),type,noTrack,source,rssi
+    // The ID carries the protocol tag after '!' (ADB = ADS-B) which SkyView reads.
+    pos = snprintf(buf, len,
+                   "$PFLAA,%d,%d,%d,%d,%d,%06X!ADB_%06X,%d,,%d,%.1f,%X,%d,%d,%d",
+                   (int)alarm_level, (int)rel_north, (int)rel_east, (int)rel_vertical,
+                   addr_type, (unsigned int)traffic->icao_addr, (unsigned int)traffic->icao_addr,
+                   (int)traffic->track_deg, (int)lround(traffic->speed_kt * 0.514444),
+                   traffic->vvel_fpm * 0.00508, acft_type,
+                   0, data_source, (int)rssi);
+
     if (pos + 6 >= len) return 0;  // Buffer too small
     
     // Append checksum
