@@ -251,8 +251,6 @@ static void nmea_ble_task(void *param) {
         if (g.connected && (g.hm_notify || g.nus_notify)) {
             gps_ownship_t own = gps_get_ownship();
             size_t n = traffic_snapshot(targets, NMEA_BLE_MAX_TARGETS);
-            double lat = own.valid ? own.lat : 0.0;
-            double lng = own.valid ? own.lng : 0.0;
 
             size_t len = nmea_format_gprmc(&own, nmea_buffer, sizeof(nmea_buffer));
             if (len > 0)
@@ -261,14 +259,11 @@ static void nmea_ble_task(void *param) {
             if (len > 0)
                 nmea_ble_send(nmea_buffer, len);
 
-            len = nmea_format_pflau(n, n ? &targets[0] : NULL, own.valid,
-                                    nmea_buffer, sizeof(nmea_buffer));
+            len = nmea_format_pflau(n, targets, n, &own, nmea_buffer, sizeof(nmea_buffer));
             if (len > 0)
                 nmea_ble_send(nmea_buffer, len);
             for (size_t i = 0; i < n; i++) {
-                if (!targets[i].position_valid)
-                    continue;
-                len = nmea_format_pflaa(&targets[i], lat, lng, nmea_buffer, sizeof(nmea_buffer));
+                len = nmea_format_pflaa(&targets[i], &own, nmea_buffer, sizeof(nmea_buffer));
                 if (len > 0)
                     nmea_ble_send(nmea_buffer, len);
             }

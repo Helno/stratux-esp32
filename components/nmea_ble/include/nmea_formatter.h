@@ -13,19 +13,18 @@
 
 // Format a traffic entry as NMEA PFLAA (FLARM traffic alert) sentence.
 // Buf must be at least 256 bytes. Returns length including checksum and CRLF.
-// ownship_lat/lng: reference position for relative coordinate calculation (degrees).
-// Until M3 GPS: use placeholder (0.0, 0.0) — relative positions will be absolute.
+// Positions and altitude are relative to the ownship GPS fix; returns 0 without one.
 size_t nmea_format_pflaa(const traffic_info_t *traffic,
-                         double ownship_lat, double ownship_lng,
+                         const gps_ownship_t *own,
                          char *buf, size_t len);
 
 // Format own-ship status as NMEA PFLAU (FLARM status) sentence.
 // Buf must be at least 256 bytes. Returns length including checksum and CRLF.
 // traffic_count: current number of tracked aircraft in table.
-// hp_traffic: highest-priority target (or NULL if none).
-// gps_valid: true if ownship position is valid (GPS M3+).
-size_t nmea_format_pflau(size_t traffic_count, const traffic_info_t *hp_traffic,
-                         bool gps_valid,
+// targets/n_targets: candidates; the nearest one with a position is reported
+// as the highest-priority target (bearing, altitude difference, distance).
+size_t nmea_format_pflau(size_t traffic_count, const traffic_info_t *targets, size_t n_targets,
+                         const gps_ownship_t *own,
                          char *buf, size_t len);
 
 // Format ownship position as $GPRMC / $GPGGA (UTC from the GPS-synced system

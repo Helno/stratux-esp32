@@ -137,19 +137,19 @@ static uint8_t traffic_src_to_data_source(uint8_t src) {
 }
 
 size_t nmea_format_pflaa(const traffic_info_t *traffic,
-                         double ownship_lat, double ownship_lng,
+                         const gps_ownship_t *own,
                          char *buf, size_t len) {
-    if (!buf || !len || !traffic || !traffic->position_valid) {
+    if (!buf || !len || !traffic || !traffic->position_valid || !own || !own->valid) {
         return 0;
     }
     
     // Compute relative coordinates (North/East in meters)
     int32_t rel_north, rel_east;
-    compute_relative_coords(traffic->lat, traffic->lng, ownship_lat, ownship_lng,
+    compute_relative_coords(traffic->lat, traffic->lng, own->lat, own->lng,
                             &rel_north, &rel_east);
     
-    // Altitude difference (feet to meters: * 0.3048)
-    int32_t rel_vertical = (int32_t)((traffic->alt_ft - 0) * 0.3048);
+    // Altitude difference vs ownship GPS MSL altitude (feet to meters: * 0.3048)
+    int32_t rel_vertical = (int32_t)((traffic->alt_ft - own->alt_msl_ft) * 0.3048);
     
     // Address type (1=ICAO, 2=FLARM ID, 3=anonymous)
     uint8_t addr_type = 1;  // Always ICAO for ADS-B/UAT
@@ -199,11 +199,30 @@ size_t nmea_format_pflaa(const traffic_info_t *traffic,
     return pos;
 }
 
-size_t nmea_format_pflau(size_t traffic_count, const traffic_info_t *hp_traffic,
-                         bool gps_valid,
+size_t nmea_format_pflau(size_t traffic_count, const traffic_info_t *targets, size_t n_targets,
+                         const gps_ownship_t *own,
                          char *buf, size_t len) {
     if (!buf || !len) {
         return 0;
+    }
+    
+    bool gps_valid = own && own->valid;
+
+    // Highest priority target = nearest one with a position (needs ownship fix)
+    const traffic_info_t *hp_traffic = NULL;
+    int32_t hp_north = 0, hp_east = 0;
+    double best_dist = 0;
+    for (size_t i = 0; gps_valid && i < n_targets; i++) {
+        if (!targets[i].position_valid) continue;
+        int32_t n, e;
+        compute_relative_coords(targets[i].lat, targets[i].lng, own->lat, own->lng, &n, &e);
+        double d = hypot((double)n, (double)e);
+        if (!hp_traffic || d < best_dist) {
+            hp_traffic = &targets[i];
+            hp_north = n;
+            hp_east = e;
+            best_dist = d;
+        }
     }
     
     // TX status (1=transmitting, always on for Stratux)
@@ -218,21 +237,23 @@ size_t nmea_format_pflau(size_t traffic_count, const traffic_info_t *hp_traffic,
     // Alarm level of highest priority traffic (0 for MVP)
     uint8_t alarm_level = 0;
     
-    // Relative bearing to HP target (empty field for non-directional or no HP)
+    // Relative bearing to HP target, degrees from our track (-180..180)
     char rel_bearing_str[8] = "";
-    if (hp_traffic && hp_traffic->position_valid) {
-        // TODO: M3 GPS — compute bearing from ownship track
-        // For MVP: leave empty
+    if (hp_traffic) {
+        int b = (int)lround(atan2((double)hp_east, (double)hp_north) * 180.0 / M_PI) - (int)own->track_deg;
+        while (b > 180) b -= 360;
+        while (b < -180) b += 360;
+        snprintf(rel_bearing_str, sizeof(rel_bearing_str), "%d", b);
     }
     
     // Alarm type (0=no alarm, 2=aircraft)
     uint8_t alarm_type = alarm_level > 0 ? 2 : 0;
     
-    // HP target altitude difference (placeholder 0)
-    int32_t hp_alt_diff = 0;
+    // HP target altitude difference (meters, relative to ownship GPS MSL altitude)
+    int32_t hp_alt_diff = hp_traffic ? (int32_t)((hp_traffic->alt_ft - own->alt_msl_ft) * 0.3048) : 0;
     
-    // HP target distance (placeholder 999 meters)
-    uint32_t hp_distance = 999;
+    // HP target distance (meters)
+    uint32_t hp_distance = (uint32_t)best_dist;
     
     // HP target ICAO address (or dummy)
     uint32_t hp_addr = hp_traffic ? hp_traffic->icao_addr : 0x000000;
