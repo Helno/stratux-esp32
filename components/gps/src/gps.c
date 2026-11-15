@@ -171,7 +171,8 @@ static bool parse_rmc(const char *line, uint16_t *track_deg, uint16_t *speed_kt)
     buf[sizeof(buf) - 1] = '\0';
 
     int field = 0;
-    char *saveptr, *token = strtok_r(buf, ",", &saveptr);
+    // strsep (not strtok_r): a stationary receiver leaves the course field empty
+    char *rest = buf, *token = strsep(&rest, ",");
 
     char status = 'V';
     char time_str[10] = "", date_str[10] = "";
@@ -193,7 +194,7 @@ static bool parse_rmc(const char *line, uint16_t *track_deg, uint16_t *speed_kt)
             date_str[9] = '\0';
         }
 
-        token = strtok_r(NULL, ",", &saveptr);
+        token = strsep(&rest, ",");
         field++;
     }
 
@@ -508,6 +509,12 @@ void gps_rx_task(void *arg)
         strncpy(sent_type, line + 3, 3);
         sent_type[3] = '\0';
 
+        static uint32_t s_seen_types;
+        uint32_t type_bit = 1u << ((sent_type[0] + sent_type[1] * 3 + sent_type[2] * 7) & 31);
+        if (!(s_seen_types & type_bit)) {
+            s_seen_types |= type_bit;
+            ESP_LOGI(TAG, "first %s sentence: %.40s", sent_type, line);
+        }
         double lat = 0, lng = 0;
         int32_t alt_msl_ft = 0;
         uint8_t num_sats = 0, num_sats_solution = 0;

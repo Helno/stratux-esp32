@@ -14,10 +14,10 @@ cmake_minimum_required(VERSION 3.16)
 # RADIO drives both the sdkconfig fragment layered below and (eventually) the
 # source/component gating in main/CMakeLists.txt.
 if(NOT DEFINED RADIO)
-    set(RADIO "wifi" CACHE STRING "Radio configuration: wifi | bt")
+    set(RADIO "wifi" CACHE STRING "Radio configuration: wifi | bt | both")
 endif()
-if(NOT RADIO STREQUAL "wifi" AND NOT RADIO STREQUAL "bt")
-    message(FATAL_ERROR "RADIO must be 'wifi' or 'bt', got '${RADIO}'")
+if(NOT RADIO STREQUAL "wifi" AND NOT RADIO STREQUAL "bt" AND NOT RADIO STREQUAL "both")
+    message(FATAL_ERROR "RADIO must be 'wifi', 'bt' or 'both', got '${RADIO}'")
 endif()
 set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.${RADIO}")
 

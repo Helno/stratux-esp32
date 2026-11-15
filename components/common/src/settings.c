@@ -66,6 +66,10 @@ void settings_load(void)
     nvs_get_str(h, "gdl90_dest", g_settings.gdl90_dest, &len);
 
     nvs_close(h);
+    // Pong and M1421 share the UART pins; if both are stored, the M1421 wins
+    // (the same precedence main.c uses when it starts the receiver task).
+    if (g_settings.m1421_en)
+        g_settings.pong_en = false;
     ESP_LOGI(TAG, "settings loaded (SSID=%s, chan=%u, es=%d uat=%d)",
              g_settings.wifi_ssid, g_settings.wifi_chan,
              g_settings.es_en, g_settings.uat_en);

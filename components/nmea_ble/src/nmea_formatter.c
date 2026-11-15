@@ -6,7 +6,58 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
+#include <sys/time.h>
 
+static void append_checksum(char *buf, size_t len, size_t pos);
+
+// Degrees to NMEA ddmm.mmmm / dddmm.mmmm plus hemisphere character
+static void nmea_coord(double deg, bool is_lat, char *out, size_t n, char *hemi) {
+    *hemi = is_lat ? (deg >= 0 ? 'N' : 'S') : (deg >= 0 ? 'E' : 'W');
+    deg = fabs(deg);
+    int d = (int)deg;
+    double m = (deg - d) * 60.0;
+    snprintf(out, n, is_lat ? "%02d%07.4f" : "%03d%07.4f", d, m);
+}
+
+static bool utc_now(struct tm *tm) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    time_t t = tv.tv_sec;
+    gmtime_r(&t, tm);
+    return tm->tm_year + 1900 >= 2024;  // clock still unset before the first fix
+}
+
+size_t nmea_format_gprmc(const gps_ownship_t *own, char *buf, size_t len) {
+    struct tm tm;
+    if (!own || !own->valid || !buf || !utc_now(&tm)) return 0;
+    char lat[16], lng[16], ns, ew;
+    nmea_coord(own->lat, true, lat, sizeof(lat), &ns);
+    nmea_coord(own->lng, false, lng, sizeof(lng), &ew);
+    size_t pos = snprintf(buf, len, "$GPRMC,%02d%02d%02d.00,A,%s,%c,%s,%c,%u.0,%u.0,%02d%02d%02d,,,A",
+                          tm.tm_hour, tm.tm_min, tm.tm_sec, lat, ns, lng, ew,
+                          (unsigned)own->speed_kt, (unsigned)own->track_deg,
+                          tm.tm_mday, tm.tm_mon + 1, tm.tm_year % 100);
+    if (pos + 6 >= len) return 0;
+    append_checksum(buf, len, pos);
+    return strlen(buf);
+}
+
+size_t nmea_format_gpgga(const gps_ownship_t *own, char *buf, size_t len) {
+    struct tm tm;
+    if (!own || !own->valid || !buf || !utc_now(&tm)) return 0;
+    char lat[16], lng[16], ns, ew;
+    nmea_coord(own->lat, true, lat, sizeof(lat), &ns);
+    nmea_coord(own->lng, false, lng, sizeof(lng), &ew);
+    size_t pos = snprintf(buf, len, "$GPGGA,%02d%02d%02d.00,%s,%c,%s,%c,%u,%02u,%.1f,%.1f,M,%.1f,M,,",
+                          tm.tm_hour, tm.tm_min, tm.tm_sec, lat, ns, lng, ew,
+                          own->fix_quality ? (unsigned)own->fix_quality : 1u,
+                          (unsigned)own->num_sats, own->hdop_x10 / 10.0,
+                          own->alt_msl_ft * 0.3048, own->geoid_sep_ft * 0.3048);
+    if (pos + 6 >= len) return 0;
+    append_checksum(buf, len, pos);
+    return strlen(buf);
+}
 // NMEA checksum: XOR of all bytes between $ and *
 static uint8_t nmea_checksum(const char *sentence) {
     uint8_t sum = 0;
@@ -21,6 +72,10 @@ static uint8_t nmea_checksum(const char *sentence) {
         p++;
     }
     return sum;
+}
+
+static void append_checksum(char *buf, size_t len, size_t pos) {
+    snprintf(buf + pos, len - pos, "*%02X\r\n", nmea_checksum(buf));
 }
 
 // GDL90 emitter category → NMEA aircraft type (hex)
