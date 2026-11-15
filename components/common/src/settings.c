@@ -16,6 +16,7 @@ static void apply_defaults(settings_t *s)
     s->wifi_pass[0] = '\0';        // open AP by default
     s->wifi_chan    = 1;
     s->pong_en      = true;
+    s->m1421_en     = false;
     s->es_en        = true;
     s->uat_en       = true;
     s->gps_en       = true;        // GPS enabled by default (M3+)
@@ -47,6 +48,7 @@ void settings_load(void)
     nvs_get_str(h, "wifi_pass", g_settings.wifi_pass, &len);
     nvs_get_u8(h, "wifi_chan", &g_settings.wifi_chan);
     if (nvs_get_u8(h, "pong_en", &u8) == ESP_OK) g_settings.pong_en = u8;
+    if (nvs_get_u8(h, "m1421_en",&u8) == ESP_OK) g_settings.m1421_en = u8;
     if (nvs_get_u8(h, "es_en",   &u8) == ESP_OK) g_settings.es_en = u8;
     if (nvs_get_u8(h, "uat_en",  &u8) == ESP_OK) g_settings.uat_en = u8;
     if (nvs_get_u8(h, "gps_en",  &u8) == ESP_OK) g_settings.gps_en = u8;
@@ -83,6 +85,7 @@ esp_err_t settings_save(void)
     SET(nvs_set_str(h, "wifi_pass", g_settings.wifi_pass));
     SET(nvs_set_u8 (h, "wifi_chan", g_settings.wifi_chan));
     SET(nvs_set_u8 (h, "pong_en",   g_settings.pong_en));
+    SET(nvs_set_u8 (h, "m1421_en",  g_settings.m1421_en));
     SET(nvs_set_u8 (h, "es_en",     g_settings.es_en));
     SET(nvs_set_u8 (h, "uat_en",    g_settings.uat_en));
     SET(nvs_set_u8 (h, "gps_en",    g_settings.gps_en));

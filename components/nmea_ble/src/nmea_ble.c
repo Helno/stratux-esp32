@@ -16,9 +16,8 @@
 #include "esp_gatt_defs.h"
 #include "traffic.h"
 #include "settings.h"
+#include "gps.h"
 #include <stdio.h>
-
-static const char *TAG = "nmea_ble";
 
 // Nordic UART Service (NUS) - used by MB205 and SkyTraffic
 // Service: 6e400001-b5a3-f393-e0a9-e50e24dcca9e
@@ -28,16 +27,6 @@ static const char *TAG = "nmea_ble";
 static const uint8_t nus_service_uuid[16] = {
     0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
     0x93, 0xf3, 0xa3, 0xb5, 0x01, 0x00, 0x40, 0x6e
-};
-
-static const uint8_t nus_tx_uuid[16] = {
-    0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
-    0x93, 0xf3, 0xa3, 0xb5, 0x03, 0x00, 0x40, 0x6e
-};
-
-static const uint8_t nus_rx_uuid[16] = {
-    0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
-    0x93, 0xf3, 0xa3, 0xb5, 0x02, 0x00, 0x40, 0x6e
 };
 
 static struct {
@@ -196,27 +185,40 @@ static void gatt_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_i
     }
 }
 
+#define NMEA_BLE_MAX_TARGETS 16
+
+static void nmea_ble_send(const char *buf, size_t len) {
+    esp_ble_gatts_send_indicate(g_ble_state.gatts_if, g_ble_state.conn_handle,
+                                g_ble_state.tx_char_value_handle,
+                                len, (uint8_t *)buf, false);
+}
+
 static void nmea_ble_task(void *param) {
     char nmea_buffer[256];
-    int nmea_len;
-    
+    static traffic_info_t targets[NMEA_BLE_MAX_TARGETS];
+
     vTaskDelay(1000 / portTICK_PERIOD_MS);
-    
+
     while (1) {
-        if (g_ble_state.connected && traffic_received()) {
-            nmea_len = nmea_format_traffic(nmea_buffer, sizeof(nmea_buffer));
-            if (nmea_len > 0) {
-                printf(">>> Sending NMEA (%d bytes) <<<\n", nmea_len);
-                fflush(stdout);
-                esp_ble_gatts_send_indicate(g_ble_state.gatts_if,
-                                            g_ble_state.conn_handle,
-                                            g_ble_state.tx_char_value_handle,
-                                            nmea_len,
-                                            (uint8_t *)nmea_buffer,
-                                            false);
+        if (g_ble_state.connected) {
+            gps_ownship_t own = gps_get_ownship();
+            size_t n = traffic_snapshot(targets, NMEA_BLE_MAX_TARGETS);
+            double lat = own.valid ? own.lat : 0.0;
+            double lng = own.valid ? own.lng : 0.0;
+
+            size_t len = nmea_format_pflau(n, n ? &targets[0] : NULL, own.valid,
+                                           nmea_buffer, sizeof(nmea_buffer));
+            if (len > 0)
+                nmea_ble_send(nmea_buffer, len);
+            for (size_t i = 0; i < n; i++) {
+                if (!targets[i].position_valid)
+                    continue;
+                len = nmea_format_pflaa(&targets[i], lat, lng, nmea_buffer, sizeof(nmea_buffer));
+                if (len > 0)
+                    nmea_ble_send(nmea_buffer, len);
             }
         }
-        vTaskDelay(500 / portTICK_PERIOD_MS);
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 }
 

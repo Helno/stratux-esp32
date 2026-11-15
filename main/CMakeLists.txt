@@ -3,6 +3,7 @@ set(REQUIRED_COMPONENTS
     esp_event
     common
     pong
+    m1421
     modes
     uat
     traffic

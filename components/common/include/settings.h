@@ -10,6 +10,7 @@ typedef struct {
     char     wifi_pass[65];   // NVS "wifi_pass"  (WiFiPassphrase)  default "" (open)
     uint8_t  wifi_chan;       // NVS "wifi_chan"  (WiFiChannel)     default 1
     bool     pong_en;         // NVS "pong_en"    (Pong_Enabled)    default true
+    bool     m1421_en;        // NVS "m1421_en"   (M1421_Enabled)   default false; replaces Pong (same UART pins)
     bool     es_en;           // NVS "es_en"      (ES_Enabled)      default true
     bool     uat_en;          // NVS "uat_en"     (UAT_Enabled)     default true
     bool     gps_en;          // NVS "gps_en"     (GPS_Enabled)     default true (M3+)

@@ -42,6 +42,8 @@
   <label>WiFi SSID</label><input name="wifi_ssid" maxlength="32">
   <label>WiFi password</label><input name="wifi_pass" maxlength="64" placeholder="(empty = open AP)">
   <label>WiFi channel</label><input name="wifi_chan" type="number" min="1" max="13">
+  <label>Pong radio</label><input name="pong_en" type="checkbox">
+  <label>M1421 receiver</label><input name="m1421_en" type="checkbox">
   <label>1090ES decode</label><input name="es_en" type="checkbox">
   <label>UAT decode</label><input name="uat_en" type="checkbox">
   <label>GPS</label><input name="gps_en" type="checkbox">
@@ -59,11 +61,11 @@
   <label>Client SSID</label><input name="sta_ssid" maxlength="32" placeholder="network to join">
   <label>Client password</label><input name="sta_pass" maxlength="64" placeholder="(empty = open network)">
   <label>GDL90 targets</label><input name="gdl90_dest" maxlength="63" placeholder="ip,ip (max 4)">
-  <div class="full"><button type="submit">Save</button> <span id="saveinfo"></span></div>
+  <div class="full"><button type="submit">Save</button> <button type="button" id="rebootbtn">Reboot</button> <span id="saveinfo"></span></div>
 </form>
 
 <details>
-  <summary>Raw Pong feed</summary>
+  <summary>Raw feed <span id="rxname" class="dim"></span></summary>
   <pre id="ponglog">—</pre>
 </details>
 
@@ -77,13 +79,14 @@
     try {
       const s = await (await fetch('/getStatus')).json();
       $('status').innerHTML =
-        `Pong ${s.pong ? 'up' : '<span class="bad">down</span>'}` +
+        `${s.rx === 'none' ? 'No receiver' : s.rx} ${s.rx === 'none' ? '' : (s.rx_up ? 'up' : '<span class="bad">down</span>')}` +
         (s.degraded ? ' <span class="bad">(degraded)</span>' : '') +
         ` · ES ${s.es} <span class="dim">(rej ${s.es_rej})</span>` +
         ` · UAT ${s.uat} <span class="dim">(rej ${s.uat_rej})</span>` +
-        ` · uplink ${s.uplink} · errors ${s.pong_err}` +
+        ` · uplink ${s.uplink}` + (s.rx === 'Pong' ? ` · errors ${s.pong_err}` : '') +
         ` · clients ${s.clients}/${s.leases}` +
         ` · UTC ${s.utc_ok ? 'ok' : '—'} · v${s.version}`;
+      $('rxname').textContent = s.rx === 'none' ? '' : `(${s.rx})`;
       $('stasta').innerHTML = !s.sta_en
         ? 'WiFi client: off'
         : s.sta_up
@@ -181,6 +184,8 @@
     f.wifi_ssid.value = s.wifi_ssid;
     f.wifi_pass.value = s.wifi_pass;
     f.wifi_chan.value = s.wifi_chan;
+    f.pong_en.checked = !!s.pong_en;
+    f.m1421_en.checked = !!s.m1421_en;
     f.es_en.checked = !!s.es_en;
     f.uat_en.checked = !!s.uat_en;
     f.gps_en.checked = !!s.gps_en;
@@ -202,6 +207,8 @@
       wifi_ssid: f.wifi_ssid.value,
       wifi_pass: f.wifi_pass.value,
       wifi_chan: +f.wifi_chan.value,
+      pong_en: f.pong_en.checked,
+      m1421_en: f.m1421_en.checked,
       es_en: f.es_en.checked,
       uat_en: f.uat_en.checked,
       gps_en: f.gps_en.checked,
@@ -224,11 +231,25 @@
     }
   });
 
-  // ---- raw Pong feed (3 s poll, only while open) ----
+  // ---- receiver toggles: Pong and M1421 are mutually exclusive ----
+  $('settings').pong_en.addEventListener('change', e => {
+    if (e.target.checked) $('settings').m1421_en.checked = false;
+  });
+  $('settings').m1421_en.addEventListener('change', e => {
+    if (e.target.checked) $('settings').pong_en.checked = false;
+  });
+
+  $('rebootbtn').addEventListener('click', async () => {
+    if (!confirm('Reboot the device? You will need to rejoin the AP.')) return;
+    $('saveinfo').textContent = 'rebooting…';
+    try { await fetch('/reboot', { method: 'POST' }); } catch (e) { /* link drops */ }
+  });
+
+  // ---- raw receiver feed (3 s poll, only while open) ----
   async function pollPong() {
     if (!document.querySelector('details').open) return;
     try {
-      const t = await (await fetch('/getPongLog')).text();
+      const t = await (await fetch('/getRxLog')).text();
       const el = $('ponglog');
       el.textContent = t || '(empty)';
       el.scrollTop = el.scrollHeight;

@@ -12,6 +12,7 @@
 #include "traffic.h"
 #include "uat_uplink.h"
 #include "pong.h"
+#include "m1421.h"
 #include "gps.h"
 
 static const char *TAG = "web";
@@ -99,14 +100,17 @@ static esp_err_t status_get(httpd_req_t *req)
     net_sta_status_t sta;
     net_sta_status(&sta);
 
-    char buf[448];
+    char buf[512];
+    const char *rx = g_settings.m1421_en ? "M1421" : g_settings.pong_en ? "Pong" : "none";
+    bool rx_up = g_settings.m1421_en ? g_status.m1421_connected : g_status.pong_connected;
     int n = snprintf(buf, sizeof buf,
-        "{\"version\":\"%s\",\"pong\":%d,\"degraded\":%d,\"utc_ok\":%d,"
+        "{\"version\":\"%s\",\"rx\":\"%s\",\"rx_up\":%d,\"degraded\":%d,\"utc_ok\":%d,"
         "\"es\":%u,\"es_rej\":%u,\"uat\":%u,\"uat_rej\":%u,\"uplink\":%u,"
         "\"pong_err\":%u,\"clients\":%d,\"leases\":%d,"
         "\"sta_en\":%d,\"sta_up\":%d,\"sta_ip\":\"%s\",\"sta_gw\":\"%s\","
         "\"sta_dns\":\"%s\"}",
-        STRATUX_ESP32_VERSION, g_status.pong_connected, g_status.pong_degraded,
+        STRATUX_ESP32_VERSION, rx, rx_up,
+        !g_settings.m1421_en && g_status.pong_degraded,
         g_status.utc_ok,
         (unsigned)g_status.es_msgs, (unsigned)g_status.es_rejected,
         (unsigned)g_status.uat_msgs, (unsigned)g_status.uat_rejected,
@@ -151,6 +155,7 @@ static esp_err_t settings_get(httpd_req_t *req)
     cJSON_AddStringToObject(j, "wifi_pass", g_settings.wifi_pass);
     cJSON_AddNumberToObject(j, "wifi_chan", g_settings.wifi_chan);
     cJSON_AddBoolToObject(j, "pong_en", g_settings.pong_en);
+    cJSON_AddBoolToObject(j, "m1421_en", g_settings.m1421_en);
     cJSON_AddBoolToObject(j, "es_en", g_settings.es_en);
     cJSON_AddBoolToObject(j, "uat_en", g_settings.uat_en);
     cJSON_AddBoolToObject(j, "gps_en", g_settings.gps_en);
@@ -191,6 +196,16 @@ static void schedule_reboot(void)
         return;
     }
     esp_timer_start_once(t, 750 * 1000);
+}
+
+// ---- POST /reboot ------------------------------------------------------------
+
+static esp_err_t reboot_post(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true,\"reboot\":true}");
+    schedule_reboot();
+    return ESP_OK;
 }
 
 // Only keys present in the body are applied (PATCH semantics, like Stratux).
@@ -243,6 +258,8 @@ static esp_err_t settings_post(httpd_req_t *req)
     }
     v = cJSON_GetObjectItem(j, "pong_en");
     if (cJSON_IsBool(v)) next.pong_en = cJSON_IsTrue(v);
+    v = cJSON_GetObjectItem(j, "m1421_en");
+    if (cJSON_IsBool(v)) next.m1421_en = cJSON_IsTrue(v);
     v = cJSON_GetObjectItem(j, "es_en");
     if (cJSON_IsBool(v)) next.es_en = cJSON_IsTrue(v);
     v = cJSON_GetObjectItem(j, "uat_en");
@@ -297,6 +314,15 @@ static esp_err_t settings_post(httpd_req_t *req)
 
     cJSON_Delete(j);
 
+    // Pong and M1421 share the UART pins, so only one can be on. The one the user
+    // just switched on wins; otherwise the receiver that was already active stays.
+    if (next.pong_en && next.m1421_en) {
+        if (next.m1421_en != g_settings.m1421_en)
+            next.pong_en = false;
+        else
+            next.m1421_en = false;
+    }
+
     bool wifi_changed =
         strcmp(next.wifi_ssid, g_settings.wifi_ssid) != 0 ||
         strcmp(next.wifi_pass, g_settings.wifi_pass) != 0 ||
@@ -304,6 +330,11 @@ static esp_err_t settings_post(httpd_req_t *req)
         next.sta_en != g_settings.sta_en ||
         strcmp(next.sta_ssid, g_settings.sta_ssid) != 0 ||
         strcmp(next.sta_pass, g_settings.sta_pass) != 0;
+
+    // The receiver task is chosen once at boot, so a switch applies on reboot.
+    bool rx_changed =
+        next.pong_en != g_settings.pong_en ||
+        next.m1421_en != g_settings.m1421_en;
 
     // The GPS task reads gps_en/gps_baud only at boot, so apply on reboot.
     bool gps_changed =
@@ -322,9 +353,9 @@ static esp_err_t settings_post(httpd_req_t *req)
     }
 
     httpd_resp_set_type(req, "application/json");
-    if (wifi_changed || gps_changed) {
+    if (wifi_changed || gps_changed || rx_changed) {
         ESP_LOGW(TAG, "%s settings changed; rebooting to apply",
-                 wifi_changed ? "WiFi" : "GPS");
+                 wifi_changed ? "WiFi" : gps_changed ? "GPS" : "receiver");
         httpd_resp_sendstr(req, "{\"ok\":true,\"reboot\":true}");
         schedule_reboot();
     } else {
@@ -398,11 +429,12 @@ static esp_err_t uat_get(httpd_req_t *req)
     return ESP_OK;
 }
 
-// ---- GET /getPongLog -----------------------------------------------------------
+// ---- GET /getRxLog -------------------------------------------------------------
 
 static esp_err_t ponglog_get(httpd_req_t *req)
 {
-    size_t n = pong_diag_copy(s_ponglog, sizeof(s_ponglog));
+    size_t n = g_settings.m1421_en ? m1421_diag_copy(s_ponglog, sizeof(s_ponglog))
+                                   : pong_diag_copy(s_ponglog, sizeof(s_ponglog));
     httpd_resp_set_type(req, "text/plain");
     return httpd_resp_send(req, s_ponglog, n);
 }
@@ -520,9 +552,10 @@ void web_start(void)
         { .uri = "/getGPS",      .method = HTTP_GET,  .handler = gps_get },
         { .uri = "/getSettings", .method = HTTP_GET,  .handler = settings_get },
         { .uri = "/setSettings", .method = HTTP_POST, .handler = settings_post },
+        { .uri = "/reboot",      .method = HTTP_POST, .handler = reboot_post },
         { .uri = "/getTraffic",  .method = HTTP_GET,  .handler = traffic_get },
         { .uri = "/getUat",      .method = HTTP_GET,  .handler = uat_get },
-        { .uri = "/getPongLog",  .method = HTTP_GET,  .handler = ponglog_get },
+        { .uri = "/getRxLog",    .method = HTTP_GET,  .handler = ponglog_get },
         { .uri = "/traffic",     .method = HTTP_GET,  .handler = traffic_ws,
           .is_websocket = true },
     };

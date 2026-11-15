@@ -3,36 +3,52 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
-#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
-#include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "mbedtls/base64.h"
+#include "cJSON.h"
 #include "pins.h"
 #include "settings.h"
 #include "stratux_status.h"
-#include "modes.h"
+#include "traffic.h"
+#include "uat.h"
+
+// ADSBee m1421 dual-band (1090ES + 978 UAT) receiver on its console UART. It uses the
+// Pong's UART2 pins (the two are never connected together; settings pick one).
+//
+// The console runs at a fixed 1,000,000 baud, CRLF-terminated AT commands. With
+// AT+PROTOCOL_OUT=CONSOLE,AIRCRAFT_JSON_UAT_UPLINK the module sends one JSON object per line:
+//   {"hex":"a63993","type":"adsb_icao","link":"1090","lat":..,"lon":..,"alt_baro":..,...}
+//   {"uat_uplink":"<576 base64 chars>","rssi":-80,"t":123456}
+// Aircraft are already decoded by the module; an uplink is the de-interleaved, error-corrected
+// 432 byte FIS-B payload, the same thing the Pong delivers as a '+' line.
 
 static const char *TAG = "m1421";
 
-#define M1421_UART_PORT   UART_NUM_2
-#define M1421_RX_BUF      (2 * 1024)
-#define M1421_LINE_MAX    512
+#define M1421_UART_PORT    PONG_UART_PORT
+#define M1421_BAUD         1000000
+#define M1421_RX_BUF       4096
+#define M1421_LINE_MAX     1024            // longest line is ~621 bytes (an uplink)
+#define M1421_KEEPALIVE_MS 30000
+#define M1421_FIRST_RETRY_MS 3000          // module may still be booting at the first send
+// The module only prints when it hears aircraft, but it answers each keepalive with "OK".
+#define M1421_LINK_TIMEOUT_MS 45000
+#define UPLINK_BYTES       432
 
-// Beast frame format: 0x1A prefix, payload, 0x1A escape if payload contains 0x1A
-#define BEAST_SYNC        0x1A
-#define BEAST_DF_TYPE     1         // number of bits for DF
-#define BEAST_FRAME_LEN   14        // max payload bytes for 1090ES
+static const char *const s_commands[] = {
+    "AT+LOG_LEVEL=SILENT",
+    "AT+PROTOCOL_OUT=CONSOLE,AIRCRAFT_JSON_UAT_UPLINK",
+};
 
-// Link liveness: expect frames or heartbeat at reasonable rate
-#define M1421_LINK_TIMEOUT_MS 8000
-static int64_t s_last_frame_ms;
+static int64_t s_last_line_ms;
+static uint32_t s_rx_bytes, s_lines_json, s_lines_other;
 
-// Diagnostic ring
+// Raw feed ring: the last lines received, truncated (long uplinks are cut).
 #define DIAG_RING_SIZE 16
-#define DIAG_LINE_MAX  128
+#define DIAG_LINE_MAX  192
 typedef struct {
     char lines[DIAG_RING_SIZE][DIAG_LINE_MAX];
     uint32_t head;
@@ -54,236 +70,293 @@ static void diag_push(const char *fmt, ...)
 size_t m1421_diag_copy(char *out, size_t cap)
 {
     size_t written = 0;
-    for (uint32_t i = 0; i < s_diag.count && written < cap; i++) {
-        uint32_t idx = (s_diag.head - s_diag.count + i) % DIAG_RING_SIZE;
+    for (uint32_t i = 0; i < s_diag.count; i++) {
+        uint32_t idx = (s_diag.head + DIAG_RING_SIZE - s_diag.count + i) % DIAG_RING_SIZE;
         const char *line = s_diag.lines[idx];
         size_t len = strlen(line);
-        if (written + len + 2 > cap)
+        if (written + len + 1 >= cap)
             break;
-        written += snprintf(out + written, cap - written, "%s\n", line);
+        memcpy(out + written, line, len);
+        written += len;
+        out[written++] = '\n';
     }
     if (written < cap)
-        out[written] = 0;
+        out[written] = '\0';
     return written;
 }
 
-// ---- Beast frame parser -------------------------------------------------------
-
-// Convert hex ASCII digit to 4-bit value; return -1 if invalid
-static int hex_digit(char c)
+static void send_commands(void)
 {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    return -1;
+    for (size_t i = 0; i < sizeof(s_commands) / sizeof(s_commands[0]); i++) {
+        uart_write_bytes(M1421_UART_PORT, s_commands[i], strlen(s_commands[i]));
+        uart_write_bytes(M1421_UART_PORT, "\r\n", 2);
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
 }
 
-// Parse a single Beast frame (binary, already extracted from stream).
-// Payload is the data between BEAST_SYNC bytes (escaped if needed).
-// Returns true if successfully parsed, false otherwise.
-static bool parse_beast_frame(const uint8_t *payload, size_t len, pong_frame_t *out)
+// ---- Aircraft ----------------------------------------------------------------
+
+static traffic_addr_type_t addr_type_of(const char *type)
 {
-    if (len < 2 || len > BEAST_FRAME_LEN)
+    if (!type) return ADDR_TYPE_ADSB_ICAO;
+    if (!strcmp(type, "adsb_other")) return ADDR_TYPE_ADSB_OTHER;
+    if (!strcmp(type, "tisb_icao") || !strncmp(type, "adsr_", 5)) return ADDR_TYPE_TISB_ICAO;
+    if (!strcmp(type, "tisb_trackfile") || !strcmp(type, "tisb_other")) return ADDR_TYPE_TISB_OTHER;
+    return ADDR_TYPE_ADSB_ICAO;
+}
+
+// readsb "A0".."D7" -> GDL90 emitter category (A7 = 0x07, B0 = 0x08, ...).
+static bool emitter_cat_of(const char *c, uint8_t *out)
+{
+    if (!c || strlen(c) != 2 || c[0] < 'A' || c[0] > 'D' || c[1] < '0' || c[1] > '7')
         return false;
-
-    // Beast 1090ES: payload[0] = DF (5 bits), payload[1..] = rest of frame
-    // First byte: AAAAAAA (7 bits of DF17/18), then start of rest
-    uint8_t df = (payload[0] >> 3) & 0x1F;
-    
-    // Only handle DF 17/18 (ADS-B)
-    if (df != 17 && df != 18)
-        return false;
-
-    // Convert binary payload to hex string
-    char hex_buf[PONG_HEX_MAX];
-    for (size_t i = 0; i < len; i++) {
-        snprintf(hex_buf + (i * 2), PONG_HEX_MAX - (i * 2), "%02X", payload[i]);
-    }
-
-    out->kind = PONG_LINE_1090ES;
-    strcpy(out->hex, hex_buf);
-    out->hex_len = len * 2;
-    out->ss = 0;
-    out->rs = 0;
-    out->ss_valid = 0;
-
+    *out = (uint8_t)((c[0] - 'A') * 8 + (c[1] - '0'));
     return true;
 }
 
-// ---- Beast binary stream reader -----------------------------------------------
-
-// Read Beast frames from UART, de-escape, and pass to parser.
-// Beast frame format (from M1421 docs):
-//   0x1A (sync)
-//   payload (7 or 14 bytes typically)
-//   0x1A (sync) — marks end
-// If payload contains 0x1A, it's escaped as 0x1A 0x1A.
-
-static bool m1421_read_frame(uart_port_t port, uint8_t *frame, size_t *frame_len, int timeout_ms)
+static bool num(const cJSON *j, const char *key, double *out)
 {
-    uint8_t byte;
-    int len = 0;
-    int64_t start_ms = esp_timer_get_time() / 1000;
-
-    // Sync on first 0x1A
-    while (len < 1000) {  // safety limit
-        int bytes = uart_read_bytes(port, &byte, 1, pdMS_TO_TICKS(timeout_ms));
-        if (bytes == 0) {
-            if (esp_timer_get_time() / 1000 - start_ms > timeout_ms)
-                return false;
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-        if (byte == BEAST_SYNC)
-            break;
-    }
-
-    // Read until end 0x1A (handling escapes)
-    len = 0;
-    while (len < 100) {  // max frame size with some margin
-        int bytes = uart_read_bytes(port, &byte, 1, pdMS_TO_TICKS(100));
-        if (bytes == 0)
-            return false;  // timeout waiting for frame data
-
-        if (byte == BEAST_SYNC) {
-            // End of frame
-            *frame_len = len;
-            return len > 0;
-        }
-
-        if (len == 0 && byte == BEAST_SYNC) {
-            // Double 0x1A (escaped): add single 0x1A to payload
-            frame[len++] = BEAST_SYNC;
-            continue;
-        }
-
-        frame[len++] = byte;
-    }
-
-    return false;  // frame too long or no terminator
-}
-
-// ---- Baud rate detection -------------------------------------------------------
-
-// List of baud rates to try, in order
-static const uint32_t m1421_baud_rates[] = {
-    9600, 19200, 38400, 57600, 115200, 230400, 460800
-};
-#define NUM_BAUD_RATES (sizeof(m1421_baud_rates) / sizeof(m1421_baud_rates[0]))
-
-// Try to detect M1421 at a given baud rate: send AT probe, wait for OK
-static bool m1421_probe_baud(uart_port_t port, uint32_t baud)
-{
-    // Configure UART at this baud rate
-    uart_config_t uart_config = {
-        .baud_rate = baud,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-    };
-    uart_param_config(port, &uart_config);
-    uart_flush_input(port);
-
-    // Send AT command
-    const char *at_cmd = "AT\r\n";
-    uart_write_bytes(port, at_cmd, strlen(at_cmd));
-
-    // Wait for "OK" response (with timeout)
-    char response[64] = {0};
-    int bytes_read = 0;
-    int64_t start = esp_timer_get_time() / 1000;
-    
-    while (esp_timer_get_time() / 1000 - start < 500) {  // 500ms timeout
-        int n = uart_read_bytes(port, (uint8_t *)(response + bytes_read), 
-                               sizeof(response) - bytes_read - 1, pdMS_TO_TICKS(100));
-        if (n > 0) {
-            bytes_read += n;
-            response[bytes_read] = 0;
-            if (strstr(response, "OK"))
-                return true;
-        }
-    }
-
-    return false;
-}
-
-bool m1421_detect(void)
-{
-    if (!CONFIG_M1421_ENABLED)
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(j, key);
+    if (!cJSON_IsNumber(v))
         return false;
+    *out = v->valuedouble;
+    return true;
+}
 
-    ESP_LOGI(TAG, "M1421: Probing for ADS-B receiver on UART2...");
+static void handle_aircraft(const cJSON *j, const char *hex)
+{
+    bool non_icao = (hex[0] == '~');
+    const char *digits_start = non_icao ? hex + 1 : hex;
+    char *end = NULL;
+    unsigned long addr = strtoul(digits_start, &end, 16);
+    if (end == digits_start || *end != '\0' || addr > 0xFFFFFF)
+        return;
 
-    // Install UART driver
-    uart_driver_install(M1421_UART_PORT, M1421_RX_BUF, 0, 0, NULL, 0);
+    const cJSON *jtype = cJSON_GetObjectItemCaseSensitive(j, "type");
+    const cJSON *jlink = cJSON_GetObjectItemCaseSensitive(j, "link");
+    bool is978 = cJSON_IsString(jlink) && !strcmp(jlink->valuestring, "978");
 
-    // Try each baud rate
-    for (size_t i = 0; i < NUM_BAUD_RATES; i++) {
-        uint32_t baud = m1421_baud_rates[i];
-        ESP_LOGI(TAG, "M1421: Trying %lu baud...", baud);
+    traffic_info_t t;
+    memset(&t, 0, sizeof(t));
+    t.icao_addr = (uint32_t)addr;
+    t.addr_type = non_icao ? ADDR_TYPE_ADSB_OTHER
+                           : addr_type_of(cJSON_IsString(jtype) ? jtype->valuestring : NULL);
+    t.src = is978 ? TRAFFIC_SRC_UAT : TRAFFIC_SRC_ES;
 
-        if (m1421_probe_baud(M1421_UART_PORT, baud)) {
-            ESP_LOGI(TAG, "M1421: Detected at %lu baud!", baud);
-            diag_push("M1421 detected at %lu baud", baud);
-            return true;
+    double v, lon;
+    // The module repeats the last known position with every update, so only a recent one counts.
+    double seen_pos = 0;
+    bool pos_fresh = !num(j, "seen_pos", &seen_pos) || seen_pos <= 2;
+    if (num(j, "lat", &v) && num(j, "lon", &lon) && (v != 0 || lon != 0) && pos_fresh) {
+        t.position_valid = true;
+        t.lat = v;
+        t.lng = lon;
+    }
+
+    // alt_baro is a number, or the string "ground" in readsb output.
+    const cJSON *jbaro = cJSON_GetObjectItemCaseSensitive(j, "alt_baro");
+    if (cJSON_IsNumber(jbaro)) {
+        t.alt_ft = (int32_t)jbaro->valuedouble;
+        t.alt_valid = true;
+    } else if (cJSON_IsString(jbaro) && !strcmp(jbaro->valuestring, "ground")) {
+        t.on_ground = true;
+        t.airground_valid = true;
+    }
+    if (num(j, "alt_geom", &v)) {
+        t.gnss_alt_ft = (int32_t)v;
+        t.gnss_alt_valid = true;
+    }
+
+    double track;
+    if (num(j, "gs", &v) && (num(j, "track", &track) || num(j, "true_heading", &track))) {
+        t.speed_kt = (uint16_t)v;
+        int trk = (int)track % 360;
+        t.track_deg = (uint16_t)(trk < 0 ? trk + 360 : trk);
+        t.speed_valid = true;
+    }
+    if (num(j, "baro_rate", &v) || num(j, "geom_rate", &v)) {
+        t.vvel_fpm = (int16_t)v;
+        t.vvel_valid = true;
+    }
+
+    const cJSON *jflight = cJSON_GetObjectItemCaseSensitive(j, "flight");
+    if (cJSON_IsString(jflight)) {
+        const char *s = jflight->valuestring;
+        while (*s == ' ') s++;
+        size_t n = strlen(s);
+        while (n > 0 && s[n - 1] == ' ') n--;
+        if (n > 0) {
+            if (n > sizeof(t.tail) - 1) n = sizeof(t.tail) - 1;
+            memcpy(t.tail, s, n);
+            t.tail[n] = '\0';
+            t.tail_valid = true;
         }
     }
 
-    ESP_LOGI(TAG, "M1421: Not detected on any baud rate");
-    uart_driver_delete(M1421_UART_PORT);
-    return false;
+    const cJSON *jcat = cJSON_GetObjectItemCaseSensitive(j, "category");
+    if (cJSON_IsString(jcat) && emitter_cat_of(jcat->valuestring, &t.emitter_cat))
+        t.cat_valid = true;
+
+    if (num(j, "nic", &v)) {
+        t.nic = (uint8_t)v;
+        t.nic_valid = true;
+    }
+    if (num(j, "nac_p", &v) && v > 0) {
+        t.nacp = (uint8_t)v;
+        t.nacp_valid = true;
+    }
+
+    // rssi is INT16_MIN ("no value") for 1090 lines, so signal strength is left unset.
+
+    if (!(t.position_valid || t.alt_valid || t.gnss_alt_valid || t.speed_valid ||
+          t.vvel_valid || t.tail_valid || t.cat_valid || t.airground_valid))
+        return;
+
+    if (is978)
+        g_status.uat_msgs++;
+    else
+        g_status.es_msgs++;
+    traffic_upsert(&t);
 }
 
-// ---- Main UART reader task ---------------------------------------------------
+// ---- UAT uplink ---------------------------------------------------------------
+
+static void handle_uplink(const char *b64)
+{
+    uint8_t frame[UPLINK_BYTES];
+    size_t olen = 0;
+    if (mbedtls_base64_decode(frame, sizeof(frame), &olen,
+                              (const unsigned char *)b64, strlen(b64)) != 0 ||
+        olen != UPLINK_BYTES) {
+        g_status.uat_rejected++;
+        return;
+    }
+
+    static pong_frame_t f;   // too large for the task stack
+    memset(&f, 0, sizeof(f));
+    f.kind = PONG_LINE_UAT_UP;
+    static const char digits[] = "0123456789ABCDEF";
+    for (size_t i = 0; i < UPLINK_BYTES; i++) {
+        f.hex[2 * i]     = digits[frame[i] >> 4];
+        f.hex[2 * i + 1] = digits[frame[i] & 0x0F];
+    }
+    f.hex_len = 2 * UPLINK_BYTES;
+    f.hex[f.hex_len] = '\0';
+    uat_decode_frame(&f);
+}
+
+// ---- Line handling -------------------------------------------------------------
+
+static void handle_line(char *line, size_t len)
+{
+    s_last_line_ms = esp_timer_get_time() / 1000;
+    g_status.m1421_connected = true;
+
+    if (len == 0)
+        return;
+    // Lines that may carry key material are never kept.
+    if (!strstr(line, "Key"))
+        diag_push("%s", line);
+    if (line[0] != '{') {
+        if (s_lines_other < 10 && !strstr(line, "Key"))
+            ESP_LOGI(TAG, "module: %s", line);
+        s_lines_other++;
+        return;
+    }
+    s_lines_json++;
+    cJSON *j = cJSON_ParseWithLength(line, len);
+    if (!j) {
+        ESP_LOGV(TAG, "bad JSON line (%u bytes)", (unsigned)len);
+        return;
+    }
+    const cJSON *uplink = cJSON_GetObjectItemCaseSensitive(j, "uat_uplink");
+    const cJSON *hex = cJSON_GetObjectItemCaseSensitive(j, "hex");
+    if (cJSON_IsString(uplink))
+        handle_uplink(uplink->valuestring);
+    else if (cJSON_IsString(hex))
+        handle_aircraft(j, hex->valuestring);
+    cJSON_Delete(j);
+}
+
+// ---- Main UART reader task -----------------------------------------------------
 
 void m1421_rx_task(void *arg)
 {
-    ESP_LOGI(TAG, "M1421 task started");
+    ESP_LOGI(TAG, "M1421 task started: UART%d RX=GPIO%d TX=GPIO%d @ %d baud",
+             M1421_UART_PORT, PONG_RX_GPIO, PONG_TX_GPIO, M1421_BAUD);
 
-    // Configure UART for Beast binary at negotiated baud
-    // For now, default to 115200 (can be auto-negotiated later)
-    uart_config_t uart_config = {
-        .baud_rate = 115200,
+    uart_config_t cfg = {
+        .baud_rate = M1421_BAUD,
         .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
+        .parity    = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
     };
-    uart_param_config(M1421_UART_PORT, &uart_config);
-    uart_set_pin(M1421_UART_PORT, PONG_UART_TX_PIN, PONG_UART_RX_PIN, 
-                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    ESP_ERROR_CHECK(uart_driver_install(M1421_UART_PORT, M1421_RX_BUF, 0, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_param_config(M1421_UART_PORT, &cfg));
+    ESP_ERROR_CHECK(uart_set_pin(M1421_UART_PORT, PONG_TX_GPIO, PONG_RX_GPIO,
+                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
-    s_last_frame_ms = esp_timer_get_time() / 1000;
+    static char line[M1421_LINE_MAX];
+    size_t len = 0;
+    bool overflow = false;
+    int64_t start_ms = esp_timer_get_time() / 1000;
+    bool retried = false;
+    s_last_line_ms = start_ms;
+
+    // The module forgets unsaved settings on reset, so reassert them periodically.
+    send_commands();
+    int64_t last_cmd_ms = esp_timer_get_time() / 1000;
 
     while (1) {
-        uint8_t frame[BEAST_FRAME_LEN];
-        size_t frame_len;
-
-        // Read next Beast frame
-        if (!m1421_read_frame(M1421_UART_PORT, frame, &frame_len, 1000)) {
-            // Timeout or parse error
-            int64_t now_ms = esp_timer_get_time() / 1000;
-            if (now_ms - s_last_frame_ms > M1421_LINK_TIMEOUT_MS) {
-                ESP_LOGW(TAG, "M1421: Link timeout, no frames received");
-                g_status.m1421_connected = false;
-                continue;
+        uint8_t buf[128];
+        int n = uart_read_bytes(M1421_UART_PORT, buf, sizeof(buf), pdMS_TO_TICKS(100));
+        if (n > 0 && s_rx_bytes < 64) {
+            char hx[3 * 32 + 1];
+            int m = n < 32 ? n : 32;
+            for (int i = 0; i < m; i++)
+                snprintf(hx + 3 * i, 4, "%02x ", buf[i]);
+            ESP_LOGI(TAG, "raw rx (%d): %s", n, hx);
+        }
+        for (int i = 0; i < n; i++) {
+            s_rx_bytes++;
+            char c = (char)buf[i];
+            if (c == '\n') {
+                if (!overflow) {
+                    while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == ' '))
+                        len--;
+                    line[len] = '\0';
+                    handle_line(line, len);
+                }
+                len = 0;
+                overflow = false;
+            } else if (len < M1421_LINE_MAX - 1) {
+                line[len++] = c;
+            } else {
+                overflow = true;
             }
-            continue;
         }
 
-        s_last_frame_ms = esp_timer_get_time() / 1000;
-        g_status.m1421_connected = true;
-
-        // Parse Beast frame
-        pong_frame_t pong_frame = {0};
-        if (!parse_beast_frame(frame, frame_len, &pong_frame)) {
-            ESP_LOGV(TAG, "M1421: Failed to parse frame");
-            continue;
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        if (!retried && now_ms - start_ms >= M1421_FIRST_RETRY_MS) {
+            retried = true;
+            send_commands();
+            last_cmd_ms = now_ms;
+        } else if (now_ms - last_cmd_ms >= M1421_KEEPALIVE_MS) {
+            send_commands();
+            last_cmd_ms = now_ms;
         }
-
-        // Dispatch to modes decoder
-        diag_push("1090ES: %s", pong_frame.hex);
-        modes_decode(&pong_frame);
+        static int64_t last_stats_ms;
+        if (now_ms - last_stats_ms >= 30000) {
+            last_stats_ms = now_ms;
+            ESP_LOGI(TAG, "rx bytes=%u json=%u other=%u connected=%d",
+                     (unsigned)s_rx_bytes, (unsigned)s_lines_json,
+                     (unsigned)s_lines_other, g_status.m1421_connected);
+        }
+        if (g_status.m1421_connected && now_ms - s_last_line_ms > M1421_LINK_TIMEOUT_MS) {
+            ESP_LOGW(TAG, "no data from the M1421 for %d s", M1421_LINK_TIMEOUT_MS / 1000);
+            g_status.m1421_connected = false;
+        }
     }
 }

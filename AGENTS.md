@@ -255,7 +255,8 @@ ring/liveness — `$` is not a Pong classifier), so the channel works in both.
   Prefer porting dump1090's `mode_s.c` message layer over hand-rolling.
 - **M2** ✅ *(verified 2026-06-11 — docs/TESTING.md M2 section)*
   Web UI + robustness: settings → NVS, embedded single-page UI with live
-  traffic WS + FIS-B uplink product breakdown + raw-Pong diag (`/getPongLog`),
+  traffic WS + FIS-B uplink product breakdown + raw receiver diag (`/getRxLog`,
+  Pong or M1421 depending on `m1421_en`; `POST /reboot` for the UI button),
   cross-band source tracking (the ICAO-keyed table already dedups across
   bands; `src_bands` makes it visible). FAT static-asset serving deferred.
   Per-lease unicast delivery already landed in M0.
