@@ -264,8 +264,12 @@ static void nmea_ble_task(void *param) {
                 nmea_ble_send(nmea_buffer, len);
             for (size_t i = 0; i < n; i++) {
                 len = nmea_format_pflaa(&targets[i], &own, nmea_buffer, sizeof(nmea_buffer));
-                if (len > 0)
+                if (len > 0) {
                     nmea_ble_send(nmea_buffer, len);
+                    static int cnt;
+                    if (++cnt % 5 == 0)
+                        ESP_LOGI("nmea_ble", "sent %.*s", (int)len - 2, nmea_buffer);
+                }
             }
         }
         vTaskDelay(1000 / portTICK_PERIOD_MS);
