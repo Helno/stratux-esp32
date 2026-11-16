@@ -99,25 +99,27 @@ static struct {
     bool hm_notify, nus_notify;
 } g = {0};
 
-// Flags, 16-bit UUID list (FFE0), 128-bit UUID list (Nordic UART): 25 bytes
+// Advertisement: flags, 16-bit UUID list (FFE0) and a short complete name, so scanners that
+// never receive the scan response (SkyView/NimBLE does not) still see name + service.
+// Scan response: 128-bit UUID list (Nordic UART).
+#define ADV_NAME "Stratux"
 static uint8_t adv_raw[31];
 static uint8_t scan_rsp_raw[31];
 static uint8_t adv_raw_len, scan_rsp_raw_len;
 
 static void build_adv(void) {
+    size_t name_len = strlen(ADV_NAME);
     uint8_t n = 0;
     adv_raw[n++] = 2;  adv_raw[n++] = ESP_BLE_AD_TYPE_FLAG; adv_raw[n++] = 0x06;
     adv_raw[n++] = 3;  adv_raw[n++] = ESP_BLE_AD_TYPE_16SRV_CMPL;
     adv_raw[n++] = 0xE0; adv_raw[n++] = 0xFF;
-    adv_raw[n++] = 17; adv_raw[n++] = ESP_BLE_AD_TYPE_128SRV_CMPL;
-    memcpy(&adv_raw[n], nus_svc_uuid, 16); n += 16;
+    adv_raw[n++] = name_len + 1; adv_raw[n++] = ESP_BLE_AD_TYPE_NAME_CMPL;
+    memcpy(&adv_raw[n], ADV_NAME, name_len); n += name_len;
     adv_raw_len = n;
 
-    size_t name_len = strlen(DEVICE_NAME);
     n = 0;
-    scan_rsp_raw[n++] = name_len + 1;
-    scan_rsp_raw[n++] = ESP_BLE_AD_TYPE_NAME_CMPL;
-    memcpy(&scan_rsp_raw[n], DEVICE_NAME, name_len); n += name_len;
+    scan_rsp_raw[n++] = 17; scan_rsp_raw[n++] = ESP_BLE_AD_TYPE_128SRV_CMPL;
+    memcpy(&scan_rsp_raw[n], nus_svc_uuid, 16); n += 16;
     scan_rsp_raw_len = n;
 }
 
